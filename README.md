@@ -2,6 +2,8 @@
 
 A [MagicMirror²](https://magicmirror.builders/) module that displays your WHOOP health data – recovery score, sleep performance, and day strain – with deltas to the previous day and optional activity details. Supports multiple users on one mirror.
 
+![MMM-Whoop on a MagicMirror](screenshots/screenshot.png)
+
 ## Features
 
 - **Three headline scores** – Recovery, Sleep Performance, and Day Strain
@@ -124,6 +126,7 @@ npm start
 | `updateInterval` | `int` | `900000` | Update interval in ms (15 min) |
 | `showActivities` | `bool` | `true` | Show today's workouts below scores |
 | `maxActivities` | `int` | `3` | Maximum number of activities to display |
+| `useEmoji` | `bool` | `false` | Use emoji sport icons instead of bullet points (requires emoji font) |
 | `retryDelay` | `int` | `30000` | Base retry delay on failure in ms (exponential backoff) |
 | `animationSpeed` | `int` | `1000` | DOM update animation speed in ms |
 
@@ -178,6 +181,14 @@ clientSecret: process.env.WHOOP_CLIENT_SECRET,
 **No data showing** – WHOOP data is tied to physiological cycles. If your current cycle hasn't been scored yet (e.g., you haven't slept yet today), some fields will show `--` until data is available.
 
 **Rate limiting** – The default 15-minute interval is well within WHOOP's rate limits for personal use. If you see 429 errors, increase `updateInterval`.
+
+**Activity icons show as boxes** – The default uses plain bullet points which work everywhere. If you set `useEmoji: true`, you need an emoji font installed on the Pi:
+
+```bash
+sudo apt install fonts-noto-color-emoji
+```
+
+Then restart MagicMirror.
 
 **Multiple users** – Each user needs their own WHOOP account and their own `setup.js` run. They can share the same WHOOP Developer App (same `clientId`/`clientSecret`), but each person authorizes independently.
 

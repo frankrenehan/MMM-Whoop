@@ -17,6 +17,7 @@ Module.register("MMM-Whoop", {
     animationSpeed: 1000,
     showActivities: true,
     maxActivities: 3,
+    useEmoji: false,
     retryDelay: 30 * 1000,
     // OAuth credentials – populated from config.js
     clientId: "",
@@ -342,6 +343,9 @@ Module.register("MMM-Whoop", {
   },
 
   getSportIcon: function (sport) {
+    if (!this.config.useEmoji) return "\u2022"; // bullet dot
+
+    // Color emoji – requires fonts-noto-color-emoji on the Pi
     var icons = {
       running: "\uD83C\uDFC3",
       cycling: "\uD83D\uDEB4",
