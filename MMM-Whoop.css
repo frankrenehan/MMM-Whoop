@@ -126,19 +126,19 @@
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
-  font-size: 14px;
+  font-size: 20px;
   font-weight: 400;
-  padding: 3px 0;
-  color: rgba(255, 255, 255, 0.75);
+  padding: 4px 0;
+  color: rgba(255, 255, 255, 0.85);
 }
 
 /* Override MagicMirror .dimmed – too faint for a two-way mirror */
 .whoop-activity-row.dimmed {
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .whoop-activity-icon {
-  font-size: 15px;
+  font-size: 20px;
 }
 
 .whoop-activity-name {
