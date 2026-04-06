@@ -239,8 +239,12 @@ Module.register("MMM-Whoop", {
   },
 
   buildActivityRow: function (workout) {
+    var wrapper = document.createElement("div");
+    wrapper.className = "whoop-activity";
+
+    // Primary line – icon, name, strain, distance
     var row = document.createElement("div");
-    row.className = "whoop-activity-row dimmed";
+    row.className = "whoop-activity-row";
 
     var icon = document.createElement("span");
     icon.className = "whoop-activity-icon";
@@ -268,17 +272,20 @@ Module.register("MMM-Whoop", {
         distance.textContent = km + "km";
         row.appendChild(distance);
       }
-
-      if (workout.score.kilojoule != null) {
-        var cals = document.createElement("span");
-        cals.className = "whoop-activity-cals";
-        cals.textContent =
-          Math.round(workout.score.kilojoule / 4.184) + "cal";
-        row.appendChild(cals);
-      }
     }
 
-    return row;
+    wrapper.appendChild(row);
+
+    // Secondary line – calories
+    if (workout.score && workout.score.kilojoule != null) {
+      var detail = document.createElement("div");
+      detail.className = "whoop-activity-detail";
+      detail.textContent =
+        Math.round(workout.score.kilojoule / 4.184) + " cal";
+      wrapper.appendChild(detail);
+    }
+
+    return wrapper;
   },
 
   // --- Data extraction helpers (always return numbers) ---

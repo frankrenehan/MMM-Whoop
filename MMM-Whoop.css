@@ -126,19 +126,14 @@
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
-  font-size: 20px;
+  font-size: 26px;
   font-weight: 400;
-  padding: 4px 0;
-  color: rgba(255, 255, 255, 0.85);
-}
-
-/* Override MagicMirror .dimmed – too faint for a two-way mirror */
-.whoop-activity-row.dimmed {
+  padding: 2px 0;
   color: rgba(255, 255, 255, 0.85);
 }
 
 .whoop-activity-icon {
-  font-size: 20px;
+  font-size: 26px;
 }
 
 .whoop-activity-name {
@@ -154,9 +149,13 @@
   text-align: right;
 }
 
-.whoop-activity-cals {
-  text-align: right;
+/* Secondary detail line – calories etc. */
+.whoop-activity-detail {
+  font-size: 18px;
+  font-weight: 400;
   color: rgba(255, 255, 255, 0.55);
+  padding-left: 36px;
+  padding-bottom: 4px;
 }
 
 /* --- Loading / Error --- */
