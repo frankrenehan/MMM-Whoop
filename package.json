@@ -1,0 +1,24 @@
+{
+  "name": "mmm-whoop",
+  "version": "1.1.0",
+  "description": "MagicMirror² module displaying WHOOP recovery, sleep, and strain data",
+  "main": "node_helper.js",
+  "author": "Frank Renehan",
+  "license": "MIT",
+  "keywords": [
+    "magicmirror",
+    "magic-mirror-modules",
+    "whoop",
+    "health",
+    "recovery",
+    "sleep",
+    "strain"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/frankrenehan/MMM-Whoop"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}

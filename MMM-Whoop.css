@@ -1,0 +1,180 @@
+/* MMM-Whoop.css
+ * Styling for the WHOOP MagicMirror module
+ *
+ * Optimized for two-way mirror readability:
+ *   - Heavier font weights (mirror glass absorbs ~50% of light)
+ *   - Higher contrast / fewer opacity reductions
+ *   - Brighter, more saturated zone colors
+ *   - Larger label and delta text
+ */
+
+.mmm-whoop {
+  text-align: left;
+  font-family: "Roboto Condensed", "Roboto", "Helvetica Neue", sans-serif;
+  min-width: 300px;
+}
+
+/* --- Display name (multi-user) --- */
+
+.whoop-display-name {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 2.5px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 6px;
+}
+
+/* --- Score cards row --- */
+
+.whoop-scores {
+  display: flex;
+  justify-content: flex-start;
+  gap: 28px;
+}
+
+.whoop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 80px;
+}
+
+.whoop-label {
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  margin-bottom: 4px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.whoop-value-row {
+  display: flex;
+  align-items: baseline;
+  line-height: 1;
+}
+
+.whoop-value {
+  font-size: 52px;
+  font-weight: 400;
+}
+
+.whoop-unit {
+  font-size: 20px;
+  font-weight: 400;
+  margin-left: 2px;
+  opacity: 0.8;
+}
+
+/* --- Zone colors ---
+ * Brighter than the WHOOP app defaults to compensate
+ * for ~50% light loss through two-way mirror glass.
+ */
+
+.whoop-zone-green {
+  color: #2ee866;
+}
+
+.whoop-zone-yellow {
+  color: #ffd54f;
+}
+
+.whoop-zone-red {
+  color: #ff5252;
+}
+
+.whoop-zone-none {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* --- Deltas --- */
+
+.whoop-delta {
+  font-size: 14px;
+  font-weight: 400;
+  margin-top: 4px;
+  min-height: 18px;
+}
+
+.whoop-delta-up {
+  color: #2ee866;
+}
+
+.whoop-delta-down {
+  color: #ff5252;
+}
+
+.whoop-delta-flat {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.whoop-delta-neutral {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* --- Activities --- */
+
+.whoop-activities {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.whoop-activity-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 400;
+  padding: 3px 0;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.whoop-activity-icon {
+  font-size: 15px;
+}
+
+.whoop-activity-name {
+  min-width: 80px;
+  text-align: left;
+}
+
+.whoop-activity-strain {
+  font-weight: 500;
+  color: #ffd54f;
+  min-width: 32px;
+  text-align: right;
+}
+
+.whoop-activity-distance {
+  min-width: 50px;
+  text-align: right;
+}
+
+.whoop-activity-cals {
+  min-width: 52px;
+  text-align: right;
+  opacity: 0.6;
+}
+
+/* --- Loading / Error --- */
+
+.whoop-loading,
+.whoop-error {
+  font-size: 14px;
+  font-weight: 400;
+  padding: 8px 0;
+}
+
+/* --- Stale indicator --- */
+
+.whoop-stale {
+  font-size: 11px;
+  font-weight: 400;
+  text-align: left;
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.45);
+  letter-spacing: 0.5px;
+}
