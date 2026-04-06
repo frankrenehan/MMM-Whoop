@@ -276,12 +276,24 @@ Module.register("MMM-Whoop", {
 
     wrapper.appendChild(row);
 
-    // Secondary line – calories
+    // Secondary line – duration, calories
+    var details = [];
+    if (workout.start && workout.end) {
+      var ms = new Date(workout.end) - new Date(workout.start);
+      var mins = Math.round(ms / 60000);
+      if (mins >= 60) {
+        details.push(Math.floor(mins / 60) + "h " + (mins % 60) + "m");
+      } else {
+        details.push(mins + "m");
+      }
+    }
     if (workout.score && workout.score.kilojoule != null) {
+      details.push(Math.round(workout.score.kilojoule / 4.184) + " cal");
+    }
+    if (details.length > 0) {
       var detail = document.createElement("div");
       detail.className = "whoop-activity-detail";
-      detail.textContent =
-        Math.round(workout.score.kilojoule / 4.184) + " cal";
+      detail.textContent = details.join("  ·  ");
       wrapper.appendChild(detail);
     }
 
