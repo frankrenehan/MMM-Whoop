@@ -132,31 +132,31 @@
   color: rgba(255, 255, 255, 0.75);
 }
 
+/* Override MagicMirror .dimmed – too faint for a two-way mirror */
+.whoop-activity-row.dimmed {
+  color: rgba(255, 255, 255, 0.75);
+}
+
 .whoop-activity-icon {
   font-size: 15px;
 }
 
 .whoop-activity-name {
-  min-width: 80px;
   text-align: left;
 }
 
 .whoop-activity-strain {
   font-weight: 500;
   color: #ffd54f;
-  min-width: 32px;
-  text-align: right;
 }
 
 .whoop-activity-distance {
-  min-width: 50px;
   text-align: right;
 }
 
 .whoop-activity-cals {
-  min-width: 52px;
   text-align: right;
-  opacity: 0.6;
+  color: rgba(255, 255, 255, 0.55);
 }
 
 /* --- Loading / Error --- */
@@ -175,6 +175,6 @@
   font-weight: 400;
   text-align: left;
   margin-top: 8px;
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(255, 255, 255, 0.5);
   letter-spacing: 0.5px;
 }
