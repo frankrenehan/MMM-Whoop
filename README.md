@@ -2,7 +2,7 @@
 
 A [MagicMirror²](https://magicmirror.builders/) module that displays your WHOOP health data – recovery score, sleep performance, and day strain – with deltas to the previous day and optional activity details. Supports multiple users on one mirror.
 
-![MMM-Whoop on a MagicMirror](screenshots/screenshot.png)
+![MMM-Whoop on a MagicMirror](screenshots/screenshot.png?v=2)
 
 ## Features
 
