@@ -1,3 +1,14 @@
 node_modules/
-whoop_tokens_*.json
 .DS_Store
+
+# OAuth token files, plus backups and the temporary files the atomic
+# writer creates next to them (".<name>.<pid>.<ts>.<n>.tmp").
+whoop_tokens_*.json
+whoop_tokens_*.json.*
+.whoop_tokens_*.json.*
+.*.tmp
+*.pre-atomic-write
+
+# Local environment
+.env
+.env.*

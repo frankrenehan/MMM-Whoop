@@ -20,6 +20,7 @@ const NodeHelper = require("node_helper");
 const fs = require("fs");
 const path = require("path");
 const fetch = require("node-fetch");
+const { saveTokensSync } = require("./lib/token-store.js");
 
 const BASE_URL = "https://api.prod.whoop.com/developer";
 const TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
@@ -227,10 +228,14 @@ module.exports = NodeHelper.create({
     }
   },
 
+  // Atomic replacement: the token file is never truncated in place, so a
+  // power cut can only leave the previous tokens or the new ones behind.
+  // Error handling is unchanged -- a failed save is logged, the in-memory
+  // tokens stand, and the caller's refresh/backoff semantics are untouched.
   saveTokens: function (ctx) {
     var tag = "[MMM-Whoop:" + ctx.userId + "]";
     try {
-      fs.writeFileSync(ctx.tokenPath, JSON.stringify(ctx.tokens, null, 2));
+      saveTokensSync(ctx.tokenPath, ctx.tokens, { userId: ctx.userId });
       console.log(tag + " Tokens saved to disk");
     } catch (err) {
       console.error(tag + " Error saving tokens:", err.message);

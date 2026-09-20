@@ -13,6 +13,7 @@ A [MagicMirror²](https://magicmirror.builders/) module that displays your WHOOP
 - **Multi-user support** – multiple WHOOP accounts on one mirror
 - **Automatic token refresh** – authenticate once per user, runs indefinitely
 - **Serialized scheduling** – no concurrent API calls or token refresh races
+- **Crash-safe token storage** – token writes are atomic, so a power cut can't corrupt your credentials
 - **Stale-data mode** – keeps showing last good data on API errors
 
 ## Prerequisites
@@ -151,6 +152,25 @@ By default tokens live in the module directory as `whoop_tokens_<userId>.json`. 
 
 The module reads and refreshes tokens at that path. `tokenPath` must be absolute; when it is set, `tokenFile` is ignored.
 
+### Token storage
+
+Each user's tokens are stored as JSON — in `whoop_tokens_<userId>.json` in the module directory by default, or at
+that user's `tokenPath` if you set one. Users never share a token file.
+
+Both the initial `setup.js` write and every automatic refresh persist tokens **atomically**: the new contents are
+written to a temporary file in the same directory, flushed to disk, and then renamed over the token file. The token
+file is therefore only ever replaced by a complete copy — if the mirror loses power or the process is killed
+mid-write, you are left with either the previous tokens or the new ones, never a truncated or empty file. If the
+replacement can't be written, the existing token file is left untouched.
+
+Replacement files are created with owner-only permissions (`0600`) on platforms that support them, so a refresh also
+tightens a token file that was previously more permissive.
+
+After the rename the module flushes the containing directory as well, so the replacement itself survives a sudden
+power loss. Platforms and filesystems with no directory-flush equivalent (Windows, some network mounts) are skipped
+silently. If a directory flush is supported but fails, the module logs a warning naming the user: the tokens *were*
+saved, but that last durability step didn't complete.
+
 ## Zone Thresholds
 
 Scores are color-coded to match the WHOOP app:
@@ -165,7 +185,8 @@ Scores are color-coded to match the WHOOP app:
 
 Token files (`whoop_tokens_*.json`) contain your OAuth tokens and are excluded from version control via `.gitignore`. **Never commit these files.**
 
-For additional hardening:
+The module writes token files with owner-only permissions (`0600`), and each refresh re-applies them. To tighten a
+file written by an older version before its first refresh:
 
 ```bash
 chmod 600 modules/MMM-Whoop/whoop_tokens_*.json

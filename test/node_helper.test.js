@@ -464,3 +464,308 @@ test("init: a healthy token file still starts the loop normally", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+/* ------------------------------------------------------------------
+ * Atomic token persistence, seen from the helper.
+ *
+ * The storage layer changed; the refresh state machine did not. These
+ * tests pin both halves of that: tokens land on disk atomically and
+ * owner-only, and a durability warning after a successful replacement
+ * never turns a good refresh into an authentication failure.
+ * ------------------------------------------------------------------ */
+
+const POSIX = process.platform !== "win32";
+
+function errorWithCode(code) {
+  const err = new Error(`simulated ${code}`);
+  err.code = code;
+  return err;
+}
+
+// Fail the parent-directory fsync (the second fsync of a save) only.
+function failDirectoryFsync(error) {
+  const realFsync = fs.fsyncSync;
+  const state = { calls: 0 };
+  mock.method(fs, "fsyncSync", (fd) => {
+    state.calls += 1;
+    if (state.calls > 1) throw error;
+    return realFsync(fd);
+  });
+  return state;
+}
+
+function captureWarnings() {
+  const warnings = [];
+  mock.method(console, "warn", (...args) => warnings.push(args.join(" ")));
+  return warnings;
+}
+
+function rotatedResponse() {
+  return jsonResponse(200, {
+    access_token: "new-access",
+    refresh_token: "new-refresh",
+    expires_in: 3600,
+    scope: "offline",
+  });
+}
+
+test("saveTokens leaves no temporary file beside the token file", () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    ctx.tokens.access_token = "rotated";
+    helper.saveTokens(ctx);
+
+    assert.equal(onDisk(tokenPath).access_token, "rotated");
+    assert.deepEqual(fs.readdirSync(tmp), [path.basename(tokenPath)]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("saveTokens tightens a world-readable token file to owner-only", (t) => {
+  if (!POSIX) return t.skip("file modes not checkable on this platform");
+
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    fs.chmodSync(tokenPath, 0o644);
+
+    helper.saveTokens(ctx);
+
+    assert.equal(fs.statSync(tokenPath).mode & 0o777, 0o600);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a directory-fsync warning does not turn a successful refresh into a failure", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    fetchStub.setHandler(async () => rotatedResponse());
+    const fsync = failDirectoryFsync(errorWithCode("EIO"));
+    const warnings = captureWarnings();
+
+    const ok = await helper._doRefresh(ctx);
+    mock.restoreAll();
+
+    assert.equal(ok, true, "the refresh still reports success");
+    assert.equal(fsync.calls, 2, "the directory flush was attempted");
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /\[MMM-Whoop:alice\]/);
+
+    // The replacement really happened, and no auth state moved.
+    const saved = onDisk(tokenPath);
+    assert.equal(saved.access_token, "new-access");
+    assert.equal(saved.refresh_token, "new-refresh");
+    assert.ok(!saved.refresh_uncertain, "durability doubt is not token doubt");
+    assert.ok(!saved.reauth_required);
+    assert.equal(ctx.reauthRequired, false);
+    assert.equal(ctx.consecutiveErrors, 0);
+    assert.deepEqual(fs.readdirSync(tmp), [path.basename(tokenPath)]);
+  } finally {
+    mock.restoreAll();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a save failure before rename keeps the old file and the existing error semantics", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  const before = fs.readFileSync(tokenPath);
+  try {
+    fetchStub.setHandler(async () => rotatedResponse());
+    mock.method(fs, "renameSync", () => {
+      throw errorWithCode("EIO");
+    });
+
+    // As before this change, a failed write is logged and swallowed: it does
+    // not throw, and it does not invent a new authentication state.
+    const ok = await helper._doRefresh(ctx);
+    mock.restoreAll();
+
+    assert.equal(ok, true);
+    assert.equal(ctx.tokens.access_token, "new-access", "in-memory tokens still rotate");
+    assert.deepEqual(fs.readFileSync(tokenPath), before, "old token file byte-for-byte intact");
+    assert.equal(ctx.reauthRequired, false);
+    assert.deepEqual(fs.readdirSync(tmp), [path.basename(tokenPath)], "temp file cleaned up");
+  } finally {
+    mock.restoreAll();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a save failure while recording refresh_uncertain stays non-terminal", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  const before = fs.readFileSync(tokenPath);
+  try {
+    fetchStub.setHandler(async () => {
+      throw new Error("request to https://api.prod.whoop.com/... failed");
+    });
+    mock.method(fs, "renameSync", () => {
+      throw errorWithCode("EIO");
+    });
+
+    const ok = await helper._doRefresh(ctx);
+    mock.restoreAll();
+
+    assert.equal(ok, false);
+    assert.equal(ctx.reauthRequired, false, "a storage failure is not a rejected token");
+    assert.equal(ctx.tokens.refresh_uncertain, true, "still recorded in memory");
+    assert.deepEqual(fs.readFileSync(tokenPath), before);
+    assert.deepEqual(fs.readdirSync(tmp), [path.basename(tokenPath)]);
+  } finally {
+    mock.restoreAll();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("one user's failing token persistence does not affect another user", async () => {
+  const helper = makeHelper();
+  const tmp = makeTmpDir();
+  const alicePath = path.join(tmp, "alice.json");
+  const bobPath = path.join(tmp, "bob.json");
+  fs.writeFileSync(alicePath, JSON.stringify(FAKE_TOKENS));
+  fs.writeFileSync(bobPath, JSON.stringify(FAKE_TOKENS));
+  const aliceBefore = fs.readFileSync(alicePath);
+
+  try {
+    helper.socketNotificationReceived("WHOOP_INIT", baseConfig("alice", { tokenPath: alicePath }));
+    helper.socketNotificationReceived("WHOOP_INIT", baseConfig("bob", { tokenPath: bobPath }));
+    const alice = helper.users.alice;
+    const bob = helper.users.bob;
+
+    fetchStub.setHandler(async () => rotatedResponse());
+
+    // Only alice's destination is unwritable.
+    const realRename = fs.renameSync;
+    mock.method(fs, "renameSync", (from, to) => {
+      if (String(to) === alicePath) throw errorWithCode("EACCES");
+      return realRename(from, to);
+    });
+
+    assert.equal(await helper._doRefresh(alice), true);
+    assert.equal(await helper._doRefresh(bob), true);
+    mock.restoreAll();
+
+    assert.deepEqual(fs.readFileSync(alicePath), aliceBefore, "alice's file is untouched");
+    assert.equal(onDisk(bobPath).access_token, "new-access", "bob persists normally");
+    assert.equal(alice.reauthRequired, false);
+    assert.equal(bob.reauthRequired, false);
+    assert.notEqual(alice.tokens, bob.tokens, "no shared token state");
+    assert.deepEqual(fs.readdirSync(tmp).sort(), ["alice.json", "bob.json"]);
+  } finally {
+    mock.restoreAll();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------------------
+ * Per-user refresh locking – unchanged by the storage rework.
+ * ------------------------------------------------------------------ */
+
+test("concurrent refreshes for one user share a single in-flight request", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    let calls = 0;
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fetchStub.setHandler(async () => {
+      calls += 1;
+      await gate;
+      return rotatedResponse();
+    });
+
+    const first = helper.refreshAccessToken(ctx);
+    const second = helper.refreshAccessToken(ctx);
+    assert.equal(first, second, "the second caller awaits the same promise");
+
+    release();
+    const [a, b] = await Promise.all([first, second]);
+
+    assert.equal(a, true);
+    assert.equal(b, true);
+    assert.equal(calls, 1, "only one refresh request is issued");
+    assert.equal(ctx._refreshPromise, null, "the lock is released afterwards");
+    assert.equal(onDisk(tokenPath).refresh_token, "new-refresh");
+    assert.deepEqual(fs.readdirSync(tmp), [path.basename(tokenPath)]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the refresh lock is released even when the save fails", async () => {
+  const helper = makeHelper();
+  const { ctx, tmp } = makeRefreshCtx(helper);
+  try {
+    fetchStub.setHandler(async () => rotatedResponse());
+    mock.method(fs, "renameSync", () => {
+      throw errorWithCode("EIO");
+    });
+
+    await helper.refreshAccessToken(ctx);
+    mock.restoreAll();
+
+    assert.equal(ctx._refreshPromise, null);
+  } finally {
+    mock.restoreAll();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh locks are per user, not global", async () => {
+  const helper = makeHelper();
+  const tmp = makeTmpDir();
+  const alicePath = path.join(tmp, "alice.json");
+  const bobPath = path.join(tmp, "bob.json");
+  fs.writeFileSync(alicePath, JSON.stringify(FAKE_TOKENS));
+  fs.writeFileSync(bobPath, JSON.stringify(FAKE_TOKENS));
+
+  try {
+    helper.socketNotificationReceived("WHOOP_INIT", baseConfig("alice", { tokenPath: alicePath }));
+    helper.socketNotificationReceived("WHOOP_INIT", baseConfig("bob", { tokenPath: bobPath }));
+    const alice = helper.users.alice;
+    const bob = helper.users.bob;
+
+    let calls = 0;
+    fetchStub.setHandler(async () => {
+      calls += 1;
+      return rotatedResponse();
+    });
+
+    const aPromise = helper.refreshAccessToken(alice);
+    const bPromise = helper.refreshAccessToken(bob);
+    assert.notEqual(aPromise, bPromise, "each user holds its own lock");
+
+    await Promise.all([aPromise, bPromise]);
+
+    assert.equal(calls, 2, "neither user blocks the other");
+    assert.equal(onDisk(alicePath).access_token, "new-access");
+    assert.equal(onDisk(bobPath).access_token, "new-access");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------------------
+ * Both persistence paths go through the shared atomic writer.
+ * ------------------------------------------------------------------ */
+
+test("neither node_helper.js nor setup.js writes the token file directly", () => {
+  for (const file of ["node_helper.js", "setup.js"]) {
+    const source = fs.readFileSync(path.join(MODULE_DIR, file), "utf8");
+    assert.ok(
+      source.includes('require("./lib/token-store.js")'),
+      `${file} should persist tokens through the shared writer`
+    );
+    assert.ok(
+      !/fs\.writeFileSync\s*\(/.test(source),
+      `${file} should have no direct writeFileSync token-save path`
+    );
+  }
+});

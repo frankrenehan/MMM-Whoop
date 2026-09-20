@@ -22,9 +22,9 @@
  */
 
 const http = require("http");
-const fs = require("fs");
 const path = require("path");
 const { URL, URLSearchParams } = require("url");
+const { saveTokensSync } = require("./lib/token-store.js");
 
 const crypto = require("crypto");
 
@@ -195,7 +195,8 @@ const server = http.createServer(async (req, res) => {
         created_at: new Date().toISOString(),
       };
 
-      fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
+      // Same atomic, owner-only persistence the runtime refresh uses.
+      saveTokensSync(TOKEN_FILE, tokens, { userId: USER_ID });
 
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end(
