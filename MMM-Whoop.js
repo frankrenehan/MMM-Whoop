@@ -19,6 +19,9 @@ Module.register("MMM-Whoop", {
     maxActivities: 3,
     useEmoji: false,
     retryDelay: 30 * 1000,
+    // Optional absolute path to this user's token file. Takes precedence
+    // over tokenFile. Default: whoop_tokens_<userId>.json in module dir.
+    tokenPath: "",
     // OAuth credentials – populated from config.js
     clientId: "",
     clientSecret: "",

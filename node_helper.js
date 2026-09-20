@@ -46,12 +46,20 @@ module.exports = NodeHelper.create({
       var config = payload;
       if (!this.validateConfig(config, userId)) return;
 
-      var tokenFile = config.tokenFile || ("whoop_tokens_" + userId + ".json");
+      // tokenPath (absolute, validated above) takes precedence over the
+      // legacy tokenFile filename, which is resolved inside the module dir.
+      var tokenPath;
+      if (config.tokenPath) {
+        tokenPath = config.tokenPath;
+      } else {
+        var tokenFile = config.tokenFile || ("whoop_tokens_" + userId + ".json");
+        tokenPath = path.resolve(__dirname, tokenFile);
+      }
       var ctx = {
         userId: userId,
         config: config,
         tokens: null,
-        tokenPath: path.resolve(__dirname, tokenFile),
+        tokenPath: tokenPath,
         nextTimer: null,
         consecutiveErrors: 0,
         fetching: false,
@@ -133,6 +141,15 @@ module.exports = NodeHelper.create({
       ) {
         console.warn(tag + " maxActivities invalid, using default (3)");
         config.maxActivities = 3;
+      }
+    }
+
+    // tokenPath: if provided, must be an absolute path. Takes precedence
+    // over tokenFile. Empty string means "not set".
+    if (config.tokenPath !== undefined && config.tokenPath !== "") {
+      if (typeof config.tokenPath !== "string" || !path.isAbsolute(config.tokenPath)) {
+        console.error(tag + " tokenPath must be an absolute filesystem path.");
+        fatal = true;
       }
     }
 

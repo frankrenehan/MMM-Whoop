@@ -129,6 +129,27 @@ npm start
 | `useEmoji` | `bool` | `false` | Use emoji sport icons instead of bullet points (requires emoji font) |
 | `retryDelay` | `int` | `30000` | Base retry delay on failure in ms (exponential backoff) |
 | `animationSpeed` | `int` | `1000` | DOM update animation speed in ms |
+| `tokenFile` | `string` | `whoop_tokens_<userId>.json` | Token filename inside the module directory. Must be a plain filename (no path separators). |
+| `tokenPath` | `string` | `""` | Optional **absolute** path to this user's token file (e.g. `"/home/pi/.config/mmm-whoop/alice.json"`). Takes precedence over `tokenFile`. A relative path is rejected and that user's instance will not start. |
+
+### Storing tokens outside the module directory
+
+By default tokens live in the module directory as `whoop_tokens_<userId>.json`. To keep them elsewhere, run `setup.js` as usual, move the resulting file to the location you want, and point `tokenPath` at it:
+
+```javascript
+{
+  module: "MMM-Whoop",
+  position: "bottom_left",
+  config: {
+    userId: "alice",
+    clientId: "YOUR_CLIENT_ID",
+    clientSecret: "YOUR_CLIENT_SECRET",
+    tokenPath: "/home/pi/.config/mmm-whoop/alice.json",
+  }
+},
+```
+
+The module reads and refreshes tokens at that path. `tokenPath` must be absolute; when it is set, `tokenFile` is ignored.
 
 ## Zone Thresholds
 
