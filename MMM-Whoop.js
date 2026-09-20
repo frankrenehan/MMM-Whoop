@@ -61,7 +61,12 @@ Module.register("MMM-Whoop", {
         this.updateDom(this.config.animationSpeed);
         break;
       case "WHOOP_ERROR":
-        if (this.loaded) {
+        if (payload.reauthRequired) {
+          // Terminal: nothing will refresh until setup.js is re-run, so
+          // show it even when stale data is still on screen.
+          this.error = payload.message;
+          this.stale = false;
+        } else if (this.loaded) {
           this.stale = true;
           this.error = null;
         } else {

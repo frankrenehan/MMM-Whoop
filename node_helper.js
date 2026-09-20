@@ -27,6 +27,9 @@ const TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
 // Safe characters for userId and tokenFile path components
 var SAFE_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
+// Shown on the mirror when WHOOP has rejected the refresh token outright.
+var REAUTH_MESSAGE = "WHOOP: re-authorization required";
+
 module.exports = NodeHelper.create({
   start: function () {
     console.log("[MMM-Whoop] Node helper started");
@@ -63,21 +66,39 @@ module.exports = NodeHelper.create({
         nextTimer: null,
         consecutiveErrors: 0,
         fetching: false,
+        reauthRequired: false,
         _refreshPromise: null,
       };
 
       this.users[userId] = ctx;
       this.loadTokens(ctx);
 
-      if (ctx.tokens) {
-        this.runAndScheduleNext(ctx);
-      } else {
+      if (!ctx.tokens) {
         this.sendSocketNotification("WHOOP_ERROR", {
           userId: userId,
           message:
             "No tokens found. Run: node modules/MMM-Whoop/setup.js " +
             "--user-id " + userId + " --client-id YOUR_ID --client-secret YOUR_SECRET",
         });
+      } else if (ctx.tokens.reauth_required) {
+        // A previous run recorded that WHOOP rejected this refresh token.
+        // Rejection is permanent, so don't start the loop just to replay
+        // it. setup.js writes a fresh token file without this flag.
+        ctx.reauthRequired = true;
+        this.logReauthRequired(ctx);
+        this.sendSocketNotification("WHOOP_ERROR", {
+          userId: userId,
+          message: REAUTH_MESSAGE,
+          reauthRequired: true,
+        });
+      } else {
+        if (ctx.tokens.refresh_uncertain) {
+          console.warn(
+            "[MMM-Whoop:" + userId + "] Last refresh outcome was unknown; " +
+              "the stored refresh token may already be spent."
+          );
+        }
+        this.runAndScheduleNext(ctx);
       }
     }
   },
@@ -238,41 +259,121 @@ module.exports = NodeHelper.create({
       return false;
     }
 
-    try {
-      var params = new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: ctx.config.clientId,
-        client_secret: ctx.config.clientSecret,
-        refresh_token: ctx.tokens.refresh_token,
-        scope: "offline",
-      });
+    var params = new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: ctx.config.clientId,
+      client_secret: ctx.config.clientSecret,
+      refresh_token: ctx.tokens.refresh_token,
+      scope: "offline",
+    });
 
-      var response = await fetch(TOKEN_URL, {
+    var response;
+    try {
+      response = await fetch(TOKEN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: params,
       });
-
-      if (!response.ok) {
-        var errText = await response.text();
-        console.error(tag + " Token refresh failed:", response.status, errText);
-        return false;
-      }
-
-      var data = await response.json();
-      ctx.tokens = {
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        expires_in: data.expires_in,
-        refreshed_at: new Date().toISOString(),
-      };
-      this.saveTokens(ctx);
-      console.log(tag + " Token refreshed successfully");
-      return true;
     } catch (err) {
-      console.error(tag + " Token refresh error:", err.message);
+      // No complete HTTP response. The request may or may not have
+      // reached WHOOP, so the token we hold may or may not be spent.
+      this.markRefreshUncertain(ctx, err.message);
       return false;
     }
+
+    if (!response.ok) {
+      var errText = "";
+      try {
+        errText = await response.text();
+      } catch (e) {
+        /* body unreadable; the status is enough to classify */
+      }
+      console.error(tag + " Token refresh failed:", response.status, errText);
+
+      // On a refresh_token grant, 400 and 401 mean WHOOP has rejected
+      // the token itself. That never self-heals -- every retry just
+      // replays a spent credential -- so stop instead of backing off.
+      if (response.status === 400 || response.status === 401) {
+        this.markReauthRequired(ctx);
+      }
+      return false;
+    }
+
+    var data;
+    try {
+      data = await response.json();
+    } catch (err) {
+      // Headers arrived but the body was truncated or unparseable. WHOOP
+      // rotates the refresh token on every successful grant, so it has
+      // very likely issued a replacement that we just lost -- which
+      // leaves the token on disk already spent.
+      this.markRefreshUncertain(ctx, err.message);
+      return false;
+    }
+
+    if (!data.access_token || !data.refresh_token) {
+      // A 2xx without the expected fields is the same hazard: WHOOP may
+      // have rotated without us capturing the new token.
+      this.markRefreshUncertain(ctx, "response missing access_token/refresh_token");
+      return false;
+    }
+
+    var wasUncertain = !!ctx.tokens.refresh_uncertain;
+
+    // Replacing the object rather than merging also clears any
+    // refresh_uncertain / reauth_required flags carried on disk.
+    ctx.tokens = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_in: data.expires_in,
+      scope: data.scope,
+      refreshed_at: new Date().toISOString(),
+    };
+    ctx.reauthRequired = false;
+    this.saveTokens(ctx);
+
+    if (wasUncertain) {
+      console.log(tag + " Token refreshed successfully (previous outcome was unknown)");
+    } else {
+      console.log(tag + " Token refreshed successfully");
+    }
+    return true;
+  },
+
+  // A refresh that neither clearly succeeded nor was clearly rejected.
+  // Record the uncertainty on disk so that a rejection on the next
+  // attempt -- or after a restart -- is reported as "re-auth needed"
+  // immediately, instead of looking like a transient fetch failure.
+  markRefreshUncertain: function (ctx, detail) {
+    var tag = "[MMM-Whoop:" + ctx.userId + "]";
+    console.error(tag + " Token refresh error:", detail);
+    console.warn(
+      tag + " Refresh outcome unknown -- WHOOP may have rotated the token " +
+        "without us capturing it. If the next attempt is rejected, re-run setup.js."
+    );
+    if (ctx.tokens && !ctx.tokens.refresh_uncertain) {
+      ctx.tokens.refresh_uncertain = true;
+      this.saveTokens(ctx);
+    }
+  },
+
+  // WHOOP rejected the refresh token outright: terminal until re-auth.
+  markReauthRequired: function (ctx) {
+    ctx.reauthRequired = true;
+    if (ctx.tokens && !ctx.tokens.reauth_required) {
+      ctx.tokens.reauth_required = true;
+      this.saveTokens(ctx);
+    }
+    this.logReauthRequired(ctx);
+  },
+
+  logReauthRequired: function (ctx) {
+    console.error(
+      "[MMM-Whoop:" + ctx.userId + "] Refresh token rejected by WHOOP -- " +
+        "re-authorization required. Run: node modules/MMM-Whoop/setup.js " +
+        "--user-id " + ctx.userId + " --client-id YOUR_ID --client-secret YOUR_SECRET " +
+        "then restart MagicMirror."
+    );
   },
 
   // --- API requests ---
@@ -374,6 +475,7 @@ module.exports = NodeHelper.create({
       ctx.nextTimer = null;
     }
 
+    if (ctx.reauthRequired) return;
     if (ctx.fetching) return;
     ctx.fetching = true;
 
@@ -387,6 +489,17 @@ module.exports = NodeHelper.create({
 
   scheduleNext: function (ctx) {
     if (ctx.nextTimer) clearTimeout(ctx.nextTimer);
+    ctx.nextTimer = null;
+
+    // Terminal auth failure: backing off and trying again only replays a
+    // credential WHOOP has already rejected. Stay stopped until setup.js
+    // writes a fresh token file and MagicMirror restarts.
+    if (ctx.reauthRequired) {
+      console.error(
+        "[MMM-Whoop:" + ctx.userId + "] Fetch loop halted pending re-authorization."
+      );
+      return;
+    }
 
     var interval = ctx.config.updateInterval || 15 * 60 * 1000;
     var delay;
@@ -543,9 +656,12 @@ module.exports = NodeHelper.create({
       );
       this.sendSocketNotification("WHOOP_ERROR", {
         userId: ctx.userId,
-        message: err.endpoint
-          ? err.endpoint + ": " + err.status
-          : err.message,
+        message: ctx.reauthRequired
+          ? REAUTH_MESSAGE
+          : err.endpoint
+            ? err.endpoint + ": " + err.status
+            : err.message,
+        reauthRequired: ctx.reauthRequired,
       });
     }
   },
