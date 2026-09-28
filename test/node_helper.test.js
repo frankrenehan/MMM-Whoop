@@ -912,3 +912,203 @@ test("refresh: the retry stays inside one lock, so concurrent callers still shar
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+/* ------------------------------------------------------------------
+ * Truncated token responses.
+ *
+ * WHOOP rotates the refresh token on every grant, so a reply we cannot
+ * read takes the replacement with it and costs a re-authorization. The
+ * body is therefore read as a stream: a break that leaves complete JSON
+ * behind is recovered, and one that does not is reported with enough
+ * detail to classify it afterwards.
+ * ------------------------------------------------------------------ */
+
+// A response whose body is a real stream, optionally ending in an error
+// the way node-fetch surfaces a truncated body.
+function streamingResponse(status, chunks, endError, headers) {
+  const hdrs = headers || {};
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get: (name) => {
+        const key = name.toLowerCase();
+        return Object.prototype.hasOwnProperty.call(hdrs, key) ? hdrs[key] : null;
+      },
+    },
+    body: (async function* () {
+      for (const chunk of chunks) yield Buffer.from(chunk);
+      if (endError) throw endError;
+    })(),
+    json: async () => {
+      throw new Error("json() must not be used when a body stream is present");
+    },
+    text: async () => {
+      throw new Error("text() must not be used when a body stream is present");
+    },
+  };
+}
+
+const ROTATED = {
+  access_token: "new-access",
+  refresh_token: "new-refresh",
+  expires_in: 3600,
+  scope: "offline",
+};
+
+test("refresh: a complete body that ends unframed is recovered, not thrown away", async () => {
+  // The exact shape seen against live WHOOP: the JSON arrives whole and the
+  // stream then dies. Discarding it is what loses the rotated token.
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    const payload = JSON.stringify(ROTATED);
+    fetchStub.setHandler(async () =>
+      streamingResponse(200, [payload], new Error("Premature close"), {
+        "content-length": String(payload.length + 12),
+      })
+    );
+
+    assert.equal(await helper._doRefresh(ctx), true);
+
+    const saved = onDisk(tokenPath);
+    assert.equal(saved.refresh_token, "new-refresh");
+    assert.equal(saved.access_token, "new-access");
+    assert.ok(!saved.refresh_uncertain, "a recovered refresh records no doubt");
+    assert.ok(!saved.reauth_required);
+    assert.equal(ctx.reauthRequired, false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: a genuinely truncated body is still recorded as uncertain", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    const payload = JSON.stringify(ROTATED);
+    const half = payload.slice(0, Math.floor(payload.length / 2));
+    fetchStub.setHandler(async () =>
+      streamingResponse(200, [half], new Error("Premature close"))
+    );
+
+    assert.equal(await helper._doRefresh(ctx), false);
+    assert.equal(ctx.reauthRequired, false, "still not terminal");
+    assert.equal(onDisk(tokenPath).refresh_uncertain, true);
+    assert.equal(
+      onDisk(tokenPath).refresh_token,
+      FAKE_TOKENS.refresh_token,
+      "the stored token is left alone"
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: a normally streamed response succeeds with no diagnostic noise", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  const errors = [];
+  const realError = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try {
+    fetchStub.setHandler(async () =>
+      streamingResponse(200, [JSON.stringify(ROTATED)], null, {
+        "content-length": String(JSON.stringify(ROTATED).length),
+      })
+    );
+
+    assert.equal(await helper._doRefresh(ctx), true);
+    assert.equal(onDisk(tokenPath).refresh_token, "new-refresh");
+    assert.deepEqual(errors, [], "a clean refresh logs no diagnostics");
+  } finally {
+    console.error = realError;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: the truncation diagnostic never prints token values", async () => {
+  const helper = makeHelper();
+  const { ctx, tmp } = makeRefreshCtx(helper);
+  const errors = [];
+  const realError = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try {
+    const payload = JSON.stringify({
+      access_token: "SECRET-ACCESS-VALUE",
+      refresh_token: "SECRET-REFRESH-VALUE",
+      expires_in: 3600,
+    });
+    fetchStub.setHandler(async () =>
+      streamingResponse(200, [payload.slice(0, payload.length - 3)], new Error("Premature close"))
+    );
+
+    await helper._doRefresh(ctx);
+
+    const joined = errors.join("\n");
+    assert.match(joined, /Token refresh response problem: status=200/);
+    assert.match(joined, /Body as received/);
+    assert.match(joined, /<redacted>/);
+    assert.ok(!joined.includes("SECRET-ACCESS-VALUE"), "the access token is not logged");
+    assert.ok(!joined.includes("SECRET-REFRESH-VALUE"), "the refresh token is not logged");
+  } finally {
+    console.error = realError;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: the token request opts out of compression", async () => {
+  // A truncated gzip stream is indistinguishable from a half-sent body, so
+  // the one request that cannot be replayed asks for identity encoding.
+  const helper = makeHelper();
+  const { ctx, tmp } = makeRefreshCtx(helper);
+  try {
+    let seen = null;
+    fetchStub.setHandler(async (url, opts) => {
+      seen = opts;
+      return jsonResponse(200, ROTATED);
+    });
+
+    assert.equal(await helper._doRefresh(ctx), true);
+    assert.equal(seen.compress, false, "node-fetch is told not to negotiate gzip");
+    assert.equal(seen.headers["Accept-Encoding"], "identity");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: a stalled body is bounded, and what arrived is still used", async () => {
+  // A half-open socket yields no further chunks and no error. Without a bound
+  // the refresh never settles and the scheduler never fires again.
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  const realSetTimeout = global.setTimeout;
+  try {
+    const payload = JSON.stringify(ROTATED);
+    // Fire the module's timeout immediately instead of waiting 15s.
+    global.setTimeout = (fn, ms) =>
+      ms === 15000 ? realSetTimeout(fn, 0) : realSetTimeout(fn, ms);
+
+    const stream = new (require("stream").PassThrough)();
+    stream.write(payload); // complete JSON, then silence -- never ends
+
+    fetchStub.setHandler(async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      body: stream,
+      json: async () => {
+        throw new Error("json() must not be used when a body stream is present");
+      },
+      text: async () => {
+        throw new Error("text() must not be used when a body stream is present");
+      },
+    }));
+
+    assert.equal(await helper._doRefresh(ctx), true, "the stall resolves rather than hanging");
+    assert.equal(onDisk(tokenPath).refresh_token, "new-refresh");
+  } finally {
+    global.setTimeout = realSetTimeout;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

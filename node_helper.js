@@ -36,6 +36,101 @@ var REAUTH_MESSAGE = "WHOOP: re-authorization required";
 // call, so a user still has exactly one refresh in flight at a time.
 var REFRESH_TRANSPORT_ATTEMPTS = 2;
 
+// Ceiling on reading the token response body. A socket that goes half-open
+// leaves the read waiting forever, which is worse than a failure: the refresh
+// never finishes, the scheduler never fires again, and the mirror just stops
+// updating with nothing in the log to say why.
+var REFRESH_BODY_TIMEOUT_MS = 15000;
+
+// --- Refresh response diagnostics ------------------------------------
+//
+// A truncated token response is the one failure that costs a re-authorization:
+// WHOOP rotates the refresh token on every grant, so a reply we cannot read
+// takes the replacement with it. node-fetch reports that as a bare "Premature
+// close" with nothing attached, which is not enough to tell a mis-framed
+// Content-Length from a broken gzip stream from a genuinely half-sent body.
+//
+// Reading the stream here keeps whatever did arrive. That serves two ends: it
+// makes the next occurrence self-describing, and -- when only the framing was
+// broken and the JSON itself is complete -- it lets the rotated tokens be
+// recovered instead of lost.
+
+// Token values must never reach the log, including out of a partial body.
+function redactTokens(text) {
+  return text.replace(/("(?:access_token|refresh_token)"\s*:\s*")[^"]*/g, "$1<redacted>");
+}
+
+async function readBodyWithDiagnostics(response) {
+  var result = { text: "", received: null, streamError: null, streamed: false };
+
+  // Responses without a readable stream (notably the test doubles) fall back
+  // to the plain reader, so this stays a drop-in for the previous behaviour.
+  if (!response.body || typeof response.body[Symbol.asyncIterator] !== "function") {
+    try {
+      result.text = await response.text();
+    } catch (err) {
+      result.streamError = err;
+    }
+    return result;
+  }
+
+  result.streamed = true;
+  var chunks = [];
+  var received = 0;
+  var timedOut = false;
+  // Destroying the stream is what makes the loop below throw; without it a
+  // half-open socket simply never yields another chunk.
+  var timer = setTimeout(function () {
+    timedOut = true;
+    if (typeof response.body.destroy === "function") response.body.destroy();
+  }, REFRESH_BODY_TIMEOUT_MS);
+  try {
+    for await (var chunk of response.body) {
+      chunks.push(chunk);
+      received += chunk.length;
+    }
+  } catch (err) {
+    result.streamError = timedOut
+      ? new Error("token response body stalled for " + REFRESH_BODY_TIMEOUT_MS + "ms")
+      : err;
+  } finally {
+    clearTimeout(timer);
+  }
+  // A stall still leaves whatever arrived before it, so the recovery path
+  // below applies here too.
+  if (timedOut && !result.streamError) {
+    result.streamError = new Error(
+      "token response body stalled for " + REFRESH_BODY_TIMEOUT_MS + "ms"
+    );
+  }
+  result.received = received;
+  result.text = Buffer.concat(chunks).toString("utf8");
+  return result;
+}
+
+// One line carrying everything needed to classify a truncation after the
+// fact, since it only reproduces about an hour after an authorization.
+function describeTokenResponse(response, body) {
+  var headers = response.headers;
+  var get =
+    headers && typeof headers.get === "function"
+      ? function (name) {
+          return headers.get(name);
+        }
+      : function () {
+          return null;
+        };
+  return (
+    "status=" + response.status +
+    " content-length=" + get("content-length") +
+    " transfer-encoding=" + get("transfer-encoding") +
+    " content-encoding=" + get("content-encoding") +
+    " connection=" + get("connection") +
+    " bytes-received=" + (body.received === null ? "n/a" : body.received) +
+    " streamed=" + body.streamed
+  );
+}
+
 module.exports = NodeHelper.create({
   start: function () {
     console.log("[MMM-Whoop] Node helper started");
@@ -298,7 +393,14 @@ module.exports = NodeHelper.create({
       try {
         response = await fetch(TOKEN_URL, {
           method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            // A truncated gzip stream surfaces as the same "Premature close"
+            // as a half-sent body. This is the one request whose reply cannot
+            // be asked for again, so take compression out of the picture.
+            "Accept-Encoding": "identity",
+          },
+          compress: false,
           body: params,
         });
         break;
@@ -341,19 +443,53 @@ module.exports = NodeHelper.create({
       return false;
     }
 
-    var data;
-    try {
-      data = await response.json();
-    } catch (err) {
+    var body = await readBodyWithDiagnostics(response);
+    var data = null;
+    var parseError = null;
+    if (body.text) {
+      try {
+        data = JSON.parse(body.text);
+      } catch (err) {
+        parseError = err;
+      }
+    }
+
+    var usable = !!(data && data.access_token && data.refresh_token);
+
+    if (body.streamError || parseError) {
+      // Logged whether or not the tokens turn out to be recoverable: this
+      // failure costs a re-authorization when it is not, and it only shows up
+      // an hour after an authorization, so the evidence has to be captured
+      // the first time it happens.
+      console.error(
+        tag + " Token refresh response problem: " + describeTokenResponse(response, body)
+      );
+      console.error(
+        tag + " Body as received (" + body.text.length + " chars): " +
+          redactTokens(body.text).slice(0, 500)
+      );
+    }
+
+    if (body.streamError && usable) {
+      // The stream ended badly but the JSON that arrived is complete, so the
+      // rotated tokens are in hand after all. Discarding them here is exactly
+      // what forces the re-authorization, so they are taken instead.
+      console.warn(
+        tag + " Token response ended early (" + body.streamError.message +
+          ") but the JSON received is complete -- using the rotated tokens."
+      );
+    } else if (body.streamError || parseError) {
       // Headers arrived but the body was truncated or unparseable. WHOOP
       // rotates the refresh token on every successful grant, so it has
       // very likely issued a replacement that we just lost -- which
       // leaves the token on disk already spent.
-      this.markRefreshUncertain(ctx, err.message, { responseReceived: true });
+      this.markRefreshUncertain(ctx, (body.streamError || parseError).message, {
+        responseReceived: true,
+      });
       return false;
     }
 
-    if (!data.access_token || !data.refresh_token) {
+    if (!usable) {
       // A 2xx without the expected fields is the same hazard: WHOOP may
       // have rotated without us capturing the new token.
       this.markRefreshUncertain(ctx, "response missing access_token/refresh_token", {
