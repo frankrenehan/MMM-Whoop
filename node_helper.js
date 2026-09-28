@@ -31,6 +31,11 @@ var SAFE_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 // Shown on the mirror when WHOOP has rejected the refresh token outright.
 var REAUTH_MESSAGE = "WHOOP: re-authorization required";
 
+// How many times to send the refresh request when no response comes back at
+// all. Only transport failures are retried, and only within one _doRefresh
+// call, so a user still has exactly one refresh in flight at a time.
+var REFRESH_TRANSPORT_ATTEMPTS = 2;
+
 module.exports = NodeHelper.create({
   start: function () {
     console.log("[MMM-Whoop] Node helper started");
@@ -272,17 +277,49 @@ module.exports = NodeHelper.create({
       scope: "offline",
     });
 
+    // The two ways a refresh can fail without a verdict are not equally
+    // hopeless, and treating them alike is what turns a blip into a
+    // re-authorization:
+    //
+    //   fetch() rejects   No HTTP response arrived at all, so the request
+    //                     may never have reached WHOOP and the stored
+    //                     refresh token is probably still live. Worth one
+    //                     immediate retry -- the scheduler's retry is a
+    //                     backoff away, and the access token is already dead.
+    //
+    //   body is lost      A response did arrive, so WHOOP has already
+    //                     rotated. Retrying would only replay a spent
+    //                     credential and turn doubt into a certain 400,
+    //                     so that path below deliberately does not retry.
     var response;
-    try {
-      response = await fetch(TOKEN_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: params,
+    var transportError = null;
+    for (var attempt = 1; attempt <= REFRESH_TRANSPORT_ATTEMPTS; attempt++) {
+      transportError = null;
+      try {
+        response = await fetch(TOKEN_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: params,
+        });
+        break;
+      } catch (err) {
+        transportError = err;
+        if (attempt < REFRESH_TRANSPORT_ATTEMPTS) {
+          console.warn(
+            tag + " Token refresh did not reach WHOOP (" + err.message +
+              "); retrying once before assuming the token was spent."
+          );
+        }
+      }
+    }
+
+    if (transportError) {
+      // Every attempt failed without a response. As far as we can tell the
+      // token is untouched, but that cannot be proved, so the existing
+      // uncertain-then-backoff semantics stand.
+      this.markRefreshUncertain(ctx, transportError.message, {
+        responseReceived: false,
       });
-    } catch (err) {
-      // No complete HTTP response. The request may or may not have
-      // reached WHOOP, so the token we hold may or may not be spent.
-      this.markRefreshUncertain(ctx, err.message);
       return false;
     }
 
@@ -312,14 +349,16 @@ module.exports = NodeHelper.create({
       // rotates the refresh token on every successful grant, so it has
       // very likely issued a replacement that we just lost -- which
       // leaves the token on disk already spent.
-      this.markRefreshUncertain(ctx, err.message);
+      this.markRefreshUncertain(ctx, err.message, { responseReceived: true });
       return false;
     }
 
     if (!data.access_token || !data.refresh_token) {
       // A 2xx without the expected fields is the same hazard: WHOOP may
       // have rotated without us capturing the new token.
-      this.markRefreshUncertain(ctx, "response missing access_token/refresh_token");
+      this.markRefreshUncertain(ctx, "response missing access_token/refresh_token", {
+        responseReceived: true,
+      });
       return false;
     }
 
@@ -349,12 +388,18 @@ module.exports = NodeHelper.create({
   // Record the uncertainty on disk so that a rejection on the next
   // attempt -- or after a restart -- is reported as "re-auth needed"
   // immediately, instead of looking like a transient fetch failure.
-  markRefreshUncertain: function (ctx, detail) {
+  markRefreshUncertain: function (ctx, detail, options) {
     var tag = "[MMM-Whoop:" + ctx.userId + "]";
+    var responseReceived = !!(options && options.responseReceived);
     console.error(tag + " Token refresh error:", detail);
     console.warn(
-      tag + " Refresh outcome unknown -- WHOOP may have rotated the token " +
-        "without us capturing it. If the next attempt is rejected, re-run setup.js."
+      tag + " Refresh outcome unknown -- " +
+        (responseReceived
+          ? "WHOOP replied but the reply was lost, so it has very likely " +
+            "rotated the refresh token without us capturing it."
+          : "WHOOP could not be reached, so the stored refresh token may " +
+            "well still be valid.") +
+        " If the next attempt is rejected, re-run setup.js."
     );
     if (ctx.tokens && !ctx.tokens.refresh_uncertain) {
       ctx.tokens.refresh_uncertain = true;

@@ -769,3 +769,146 @@ test("neither node_helper.js nor setup.js writes the token file directly", () =>
     );
   }
 });
+
+/* ------------------------------------------------------------------
+ * Transport failures vs. lost responses.
+ *
+ * WHOOP rotates the refresh token on every successful grant, so a
+ * refresh that produced no response at all is very different from one
+ * whose response was lost: the first probably never spent the token,
+ * the second almost certainly did. Only the first is retried.
+ * ------------------------------------------------------------------ */
+
+test("refresh: a request that never reached WHOOP is retried once and can succeed", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    let calls = 0;
+    fetchStub.setHandler(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error(
+          "request to https://api.prod.whoop.com/oauth/oauth2/token failed, " +
+            "reason: socket hang up"
+        );
+      }
+      return jsonResponse(200, {
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        expires_in: 3600,
+        scope: "offline",
+      });
+    });
+
+    assert.equal(await helper._doRefresh(ctx), true);
+    assert.equal(calls, 2, "the unanswered request is retried once");
+
+    const saved = onDisk(tokenPath);
+    assert.equal(saved.refresh_token, "new-refresh");
+    assert.ok(!saved.refresh_uncertain, "a recovered refresh records no doubt");
+    assert.ok(!saved.reauth_required);
+    assert.equal(ctx.reauthRequired, false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: two unanswered requests fall back to uncertain, not terminal", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    let calls = 0;
+    fetchStub.setHandler(async () => {
+      calls += 1;
+      throw new Error("request to https://api.prod.whoop.com/... failed");
+    });
+
+    assert.equal(await helper._doRefresh(ctx), false);
+    assert.equal(calls, 2, "retried once, then given up on");
+    assert.equal(ctx.reauthRequired, false, "still not terminal");
+    assert.equal(onDisk(tokenPath).refresh_uncertain, true);
+    assert.equal(onDisk(tokenPath).refresh_token, FAKE_TOKENS.refresh_token);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: a lost response body is never retried", async () => {
+  // The response proves WHOOP handled the grant, so the stored token is
+  // almost certainly spent. Sending it again would replay a dead
+  // credential and convert recoverable doubt into a certain rejection.
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    let calls = 0;
+    fetchStub.setHandler(async () => {
+      calls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("Invalid response body ...: Premature close");
+        },
+        text: async () => {
+          throw new Error("Invalid response body ...: Premature close");
+        },
+      };
+    });
+
+    assert.equal(await helper._doRefresh(ctx), false);
+    assert.equal(calls, 1, "a received response is not re-sent");
+    assert.equal(ctx.reauthRequired, false);
+    assert.equal(onDisk(tokenPath).refresh_uncertain, true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: a rejection is not retried as though it were a transport failure", async () => {
+  const helper = makeHelper();
+  const { ctx, tokenPath, tmp } = makeRefreshCtx(helper);
+  try {
+    let calls = 0;
+    fetchStub.setHandler(async () => {
+      calls += 1;
+      return jsonResponse(400, { error: "invalid_request" });
+    });
+
+    assert.equal(await helper._doRefresh(ctx), false);
+    assert.equal(calls, 1);
+    assert.equal(ctx.reauthRequired, true);
+    assert.equal(onDisk(tokenPath).reauth_required, true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("refresh: the retry stays inside one lock, so concurrent callers still share it", async () => {
+  const helper = makeHelper();
+  const { ctx, tmp } = makeRefreshCtx(helper);
+  try {
+    let calls = 0;
+    fetchStub.setHandler(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("socket hang up");
+      return jsonResponse(200, {
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        expires_in: 3600,
+        scope: "offline",
+      });
+    });
+
+    const [a, b] = await Promise.all([
+      helper.refreshAccessToken(ctx),
+      helper.refreshAccessToken(ctx),
+    ]);
+
+    assert.equal(a, true);
+    assert.equal(b, true);
+    assert.equal(calls, 2, "one refresh, one retry -- not two refreshes");
+    assert.equal(ctx._refreshPromise, null, "the lock is released");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

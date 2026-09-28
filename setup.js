@@ -11,7 +11,8 @@
  *   2. Opens the WHOOP authorization URL in your browser
  *   3. Captures the authorization code from the redirect
  *   4. Exchanges it for access + refresh tokens
- *   5. Saves tokens to whoop_tokens_{userId}.json
+ *   5. Saves tokens to whoop_tokens_{userId}.json in the module directory,
+ *      or to --token-path if given
  *
  * You only need to run this once per user. The module will refresh
  * tokens automatically after that.
@@ -22,6 +23,7 @@
  */
 
 const http = require("http");
+const fs = require("fs");
 const path = require("path");
 const { URL, URLSearchParams } = require("url");
 const { saveTokensSync } = require("./lib/token-store.js");
@@ -49,10 +51,23 @@ if (!/^[a-zA-Z0-9_-]+$/.test(USER_ID)) {
   process.exit(1);
 }
 const REDIRECT_URI = `http://localhost:${PORT}/callback`;
-const TOKEN_FILE = path.resolve(
-  __dirname,
-  `whoop_tokens_${USER_ID}.json`
-);
+
+// --token-path mirrors the module's `tokenPath` config option. Installs that
+// keep MagicMirror on a read-only filesystem point both at the same absolute
+// location on a writable partition; without it setup would write beside the
+// module and the running module would carry on reading -- and failing to
+// refresh -- the stale file at `tokenPath`. An empty value means "not set",
+// matching how node_helper.js treats `tokenPath: ""`.
+const TOKEN_PATH_ARG = getArg("--token-path");
+if (TOKEN_PATH_ARG && !path.isAbsolute(TOKEN_PATH_ARG)) {
+  console.error(
+    "\n  Error: --token-path must be an absolute filesystem path.\n"
+  );
+  process.exit(1);
+}
+const TOKEN_FILE = TOKEN_PATH_ARG
+  ? path.resolve(TOKEN_PATH_ARG)
+  : path.resolve(__dirname, `whoop_tokens_${USER_ID}.json`);
 
 const AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth";
 const TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
@@ -75,7 +90,11 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error("    --user-id        User identifier (e.g. alice, bob). Default: default");
   console.error("    --client-id      Your WHOOP app Client ID");
   console.error("    --client-secret  Your WHOOP app Client Secret");
-  console.error("    --port           Local server port (default: 3456)\n");
+  console.error("    --port           Local server port (default: 3456)");
+  console.error(
+    "    --token-path     Absolute path to write the token file to. Must match\n" +
+      "                     the module's tokenPath setting when one is configured.\n"
+  );
   console.error("  Steps:");
   console.error(
     "    1. Go to https://developer-dashboard.whoop.com and create an app"
@@ -91,6 +110,20 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
   );
   console.error(
     "    node setup.js --user-id bob  --client-id ... --client-secret ...\n"
+  );
+  process.exit(1);
+}
+
+// An authorization code can only be exchanged once, so an unwritable
+// destination has to be caught before the browser round-trip rather than
+// after it -- otherwise the whole flow has to be repeated.
+const TOKEN_DIR = path.dirname(TOKEN_FILE);
+try {
+  fs.accessSync(TOKEN_DIR, fs.constants.W_OK);
+} catch (err) {
+  console.error(
+    `\n  Error: cannot write tokens to ${TOKEN_DIR} (${err.code}).\n` +
+      "  Create the directory and make it writable, then run setup again.\n"
   );
   process.exit(1);
 }

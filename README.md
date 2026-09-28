@@ -135,7 +135,7 @@ npm start
 
 ### Storing tokens outside the module directory
 
-By default tokens live in the module directory as `whoop_tokens_<userId>.json`. To keep them elsewhere, run `setup.js` as usual, move the resulting file to the location you want, and point `tokenPath` at it:
+By default tokens live in the module directory as `whoop_tokens_<userId>.json`. To keep them elsewhere, point `tokenPath` at the location you want:
 
 ```javascript
 {
@@ -151,6 +151,17 @@ By default tokens live in the module directory as `whoop_tokens_<userId>.json`. 
 ```
 
 The module reads and refreshes tokens at that path. `tokenPath` must be absolute; when it is set, `tokenFile` is ignored.
+
+Give `setup.js` the same path so that authorizing writes the token file where the module will look for it:
+
+```bash
+node setup.js --user-id alice --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET \
+  --token-path /home/pi/.config/mmm-whoop/alice.json
+```
+
+The directory must already exist and be writable; `setup.js` checks this before opening the browser, since an authorization code can only be exchanged once. If you omit `--token-path` while `tokenPath` is configured, the tokens are written beside the module and the running module will carry on using the stale file at `tokenPath`.
+
+This matters most on installs that keep MagicMirror on a read-only filesystem and put writable state on a separate partition: `tokenPath` and `--token-path` should both point at the writable one.
 
 ### Token storage
 
